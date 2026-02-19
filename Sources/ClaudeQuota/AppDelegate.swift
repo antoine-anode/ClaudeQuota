@@ -57,7 +57,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if let q = lastQuota {
             let usageItem = NSMenuItem(
-                title: "Usage 5h: \(q.percentUsed)%  —  Relief: ~\(q.estimatedTimeUntilRelief)",
+                title: "Usage 5h: \(q.percentUsed)%  —  Reset: \(q.timeUntilReset)",
                 action: nil, keyEquivalent: ""
             )
             usageItem.isEnabled = false
@@ -180,7 +180,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func applyQuota(_ quota: QuotaInfo) {
         let pct = quota.percentUsed
-        let time = quota.estimatedTimeUntilRelief
+        let time = quota.timeUntilReset
         let text = "☁ \(pct)% | \(time)"
         let color: NSColor = quota.utilization5h >= 0.80 ? .systemRed : .labelColor
 

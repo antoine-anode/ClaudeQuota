@@ -9,6 +9,7 @@ func log(_ message: String) {
 struct QuotaInfo {
     let utilization5h: Double    // 0.0 to 1.0+ (5-hour window)
     let utilization7d: Double    // 0.0 to 1.0+ (7-day window)
+    let reset5h: Date?           // server-provided reset timestamp
     let status: String?          // "allowed", "allowed_warning", "rejected"
     let representativeClaim: String?
     let fallbackPercentage: Double?
@@ -17,12 +18,12 @@ struct QuotaInfo {
         min(Int(utilization5h * 100), 100)
     }
 
-    var estimatedTimeUntilRelief: String {
-        guard utilization5h > 0 else { return "5h00m" }
-        let remainingSeconds = 5.0 * 3600.0 * (1.0 - utilization5h)
-        let clamped = max(remainingSeconds, 0)
-        let hours = Int(clamped) / 3600
-        let minutes = (Int(clamped) % 3600) / 60
+    var timeUntilReset: String {
+        guard let reset = reset5h else { return "--" }
+        let remaining = reset.timeIntervalSinceNow
+        guard remaining > 0 else { return "0h00m" }
+        let hours = Int(remaining) / 3600
+        let minutes = (Int(remaining) % 3600) / 60
         return "\(hours)h\(String(format: "%02d", minutes))m"
     }
 }
@@ -236,11 +237,27 @@ final class QuotaService {
         let claim = stringHeader(headers, key: "anthropic-ratelimit-unified-representative-claim")
         let fallback = doubleHeader(headers, key: "anthropic-ratelimit-unified-fallback-percentage")
 
-        log("Quota: 5h=\(String(format: "%.1f", util5h * 100))% 7d=\(String(format: "%.1f", util7d * 100))% status=\(status ?? "?") claim=\(claim ?? "?")")
+        // Parse reset timestamp
+        var reset5h: Date?
+        if let resetTs = doubleHeader(headers, key: "anthropic-ratelimit-unified-5h-reset") {
+            reset5h = Date(timeIntervalSince1970: resetTs)
+        }
+
+        let resetStr: String
+        if let r = reset5h {
+            let fmt = DateFormatter()
+            fmt.dateFormat = "HH:mm"
+            resetStr = fmt.string(from: r)
+        } else {
+            resetStr = "?"
+        }
+
+        log("Quota: 5h=\(String(format: "%.1f", util5h * 100))% 7d=\(String(format: "%.1f", util7d * 100))% reset=\(resetStr) status=\(status ?? "?")")
 
         return QuotaInfo(
             utilization5h: util5h,
             utilization7d: util7d,
+            reset5h: reset5h,
             status: status,
             representativeClaim: claim,
             fallbackPercentage: fallback
