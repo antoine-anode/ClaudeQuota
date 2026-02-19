@@ -4,6 +4,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var refreshTimer: Timer?
     private var lastQuota: QuotaInfo?
+    private var lastError: String?
     private var isRefreshing = false
 
     private let normalInterval: TimeInterval = 120   // 2 minutes
@@ -11,10 +12,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let highUsageThreshold: Double = 0.75
 
     private let launchAgentPath = NSHomeDirectory() + "/Library/LaunchAgents/com.claude.quota.plist"
+    private let logPath = "/tmp/claude-quota.log"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupStatusItem()
-        updateDisplay(text: "☁ --", color: .labelColor)
+        updateDisplay(text: "☁ ...", color: .labelColor)
         refreshQuota()
         scheduleTimer(interval: normalInterval)
     }
@@ -64,9 +66,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(NSMenuItem.separator())
         }
 
+        if let err = lastError {
+            let errItem = NSMenuItem(title: "Erreur: \(err)", action: nil, keyEquivalent: "")
+            errItem.isEnabled = false
+            menu.addItem(errItem)
+            menu.addItem(NSMenuItem.separator())
+        }
+
         let refreshItem = NSMenuItem(title: "Rafraîchir", action: #selector(refreshAction), keyEquivalent: "r")
         refreshItem.target = self
         menu.addItem(refreshItem)
+
+        let logItem = NSMenuItem(title: "Voir les logs", action: #selector(openLogs), keyEquivalent: "l")
+        logItem.target = self
+        menu.addItem(logItem)
 
         menu.addItem(NSMenuItem.separator())
 
@@ -116,13 +129,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let quota = try await QuotaService.shared.fetchQuota()
                 await MainActor.run {
                     self.lastQuota = quota
+                    self.lastError = nil
                     self.applyQuota(quota)
                     self.isRefreshing = false
                 }
             } catch {
                 await MainActor.run {
+                    self.lastError = error.localizedDescription
                     self.updateDisplay(text: "☁ err", color: .systemRed)
                     self.isRefreshing = false
+                    self.rebuildMenu()
                     log("Quota fetch error: \(error.localizedDescription)")
                 }
             }
@@ -162,13 +178,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             task.waitUntilExit()
             try? FileManager.default.removeItem(atPath: launchAgentPath)
         } else {
-            // Create and load
+            // Create and load — use the current binary's path
+            let execPath = Bundle.main.executablePath ?? ProcessInfo.processInfo.arguments[0]
             let plist: [String: Any] = [
                 "Label": "com.claude.quota",
-                "ProgramArguments": ["/usr/local/bin/claude-quota"],
+                "ProgramArguments": [execPath],
                 "RunAtLoad": true,
                 "KeepAlive": true,
-                "StandardErrorPath": "/tmp/claude-quota.log",
+                "StandardErrorPath": logPath,
             ]
             let data = try? PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
             FileManager.default.createFile(atPath: launchAgentPath, contents: data)
@@ -186,6 +203,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func refreshAction() {
         refreshQuota()
+    }
+
+    @objc private func openLogs() {
+        NSWorkspace.shared.open(URL(fileURLWithPath: logPath))
     }
 
     @objc private func quitAction() {

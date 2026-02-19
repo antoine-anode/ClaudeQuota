@@ -1,4 +1,4 @@
-# ☁ Claude Quota Monitor
+# Claude Quota Monitor
 
 App macOS native qui affiche l'utilisation de ton quota Claude (plan Max) directement dans la barre de menu.
 
@@ -6,7 +6,7 @@ App macOS native qui affiche l'utilisation de ton quota Claude (plan Max) direct
 
 ```
 ☁ 36% | 3h12m       usage normal
-☁ 82% | 0h54m       texte rouge (≥80%)
+☁ 82% | 0h54m       texte rouge (>=80%)
 ```
 
 ---
@@ -17,6 +17,7 @@ App macOS native qui affiche l'utilisation de ton quota Claude (plan Max) direct
 - **Temps estime** avant recuperation du quota
 - **Texte rouge** quand l'usage depasse 80%
 - **Refresh adaptatif** : toutes les 2 min (toutes les 30s au-dessus de 75%)
+- **Refresh automatique du token** OAuth quand il expire
 - **Menu deroulant** avec details (usage 7j, status, fallback)
 - **Lancement au demarrage** via LaunchAgent macOS
 - **Zero config** : reutilise le token OAuth de Claude Code
@@ -24,80 +25,53 @@ App macOS native qui affiche l'utilisation de ton quota Claude (plan Max) direct
 ## Prerequis
 
 - macOS 13+ (Ventura ou superieur)
-- Swift 5.9+ (`xcode-select --install` si besoin)
 - **Claude Code installe et connecte** (le token OAuth est lu depuis le Keychain)
+- Swift 5.9+ pour build depuis les sources (`xcode-select --install`)
 
 ## Installation
+
+### Via DMG (recommande)
+
+1. Telecharger le `.dmg` depuis [Releases](https://github.com/antoine-anode/ClaudeQuota/releases)
+2. Ouvrir le DMG
+3. Glisser **ClaudeQuota.app** dans **Applications**
+4. Lancer l'app depuis Applications
+
+> **Note Gatekeeper** : l'app n'est pas signee Apple. Au premier lancement, faire clic droit > Ouvrir, ou executer :
+> ```bash
+> xattr -d com.apple.quarantine /Applications/ClaudeQuota.app
+> ```
 
 ### Build depuis les sources
 
 ```bash
-git clone <repo-url> && cd ClaudeQuota
+git clone https://github.com/antoine-anode/ClaudeQuota.git && cd ClaudeQuota
 
-# Build release
-swift build -c release
+# Build + installer dans /Applications + activer le lancement au demarrage
+make install
 
-# Copier le binaire
-cp .build/release/ClaudeQuota /usr/local/bin/claude-quota
+# Ou juste creer le DMG
+make dmg
 ```
 
-### Lancer
+### Commandes Make
 
-```bash
-claude-quota
-```
-
-L'icone `☁` apparait dans la barre de menu. Aucune fenetre, aucune icone dans le Dock.
-
-### Lancement automatique au demarrage
-
-**Option 1 : Depuis le menu de l'app**
-
-Clic sur `☁` dans la barre de menu > **Lancer au demarrage**
-
-**Option 2 : Manuellement**
-
-```bash
-# Creer le LaunchAgent
-cat > ~/Library/LaunchAgents/com.claude.quota.plist << 'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.claude.quota</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/usr/local/bin/claude-quota</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>StandardErrorPath</key>
-    <string>/tmp/claude-quota.log</string>
-</dict>
-</plist>
-EOF
-
-# Charger
-launchctl load ~/Library/LaunchAgents/com.claude.quota.plist
-```
-
-Pour desactiver :
-
-```bash
-launchctl unload ~/Library/LaunchAgents/com.claude.quota.plist
-rm ~/Library/LaunchAgents/com.claude.quota.plist
-```
+| Commande | Description |
+|----------|-------------|
+| `make build` | Compile en release |
+| `make bundle` | Cree le .app bundle |
+| `make dmg` | Cree le DMG avec drag-and-drop |
+| `make install` | Installe dans /Applications + LaunchAgent |
+| `make uninstall` | Supprime tout |
+| `make clean` | Nettoie les fichiers de build |
 
 ## Comment ca marche
 
 ```
 ┌──────────────┐      probe request       ┌──────────────────┐
 │              │  ──────────────────────>  │                  │
-│  claude-     │   POST /v1/messages      │   Anthropic API  │
-│  quota       │   (1 token, ~0 cout)     │                  │
+│  ClaudeQuota │   POST /v1/messages      │   Anthropic API  │
+│  .app        │   (1 token, ~0 cout)     │                  │
 │              │  <──────────────────────  │                  │
 └──────┬───────┘   response headers       └──────────────────┘
        │
@@ -113,9 +87,10 @@ rm ~/Library/LaunchAgents/com.claude.quota.plist
 ```
 
 1. **Keychain** : Lit le token OAuth de Claude Code (`Claude Code-credentials`)
-2. **API Probe** : Envoie une requete minimale (1 token) a l'API Anthropic avec le header `anthropic-beta: oauth-2025-04-20`
-3. **Headers** : Parse les headers `anthropic-ratelimit-unified-*` de la reponse
-4. **Affichage** : Met a jour la barre de menu avec le pourcentage et le temps estime
+2. **Token Refresh** : Si le token a expire (401), le refresh automatiquement via OAuth
+3. **API Probe** : Envoie une requete minimale (1 token) a l'API Anthropic
+4. **Headers** : Parse les headers `anthropic-ratelimit-unified-*` de la reponse
+5. **Affichage** : Met a jour la barre de menu avec le pourcentage et le temps estime
 
 Le temps affiche est une **estimation** : il represente le quota restant dans la fenetre de 5h si tu arretes d'utiliser Claude maintenant.
 
@@ -138,18 +113,21 @@ Clic sur l'icone `☁` pour voir :
 ```
 ClaudeQuota/
 ├── Package.swift                    # SwiftPM manifest
+├── Makefile                         # Build, bundle, DMG, install
 ├── README.md
+├── packaging/
+│   └── Info.plist                   # App bundle metadata
 └── Sources/ClaudeQuota/
     ├── main.swift                   # Point d'entree NSApplication
     ├── AppDelegate.swift            # Menu bar UI, timer, refresh
-    └── QuotaService.swift           # Keychain + API + parsing headers
+    └── QuotaService.swift           # Keychain, token refresh, API, headers
 ```
 
 ## Fichiers installes
 
 | Fichier | Chemin |
 |---------|--------|
-| Binaire | `/usr/local/bin/claude-quota` |
+| App | `/Applications/ClaudeQuota.app` |
 | LaunchAgent | `~/Library/LaunchAgents/com.claude.quota.plist` |
 | Logs | `/tmp/claude-quota.log` |
 
@@ -171,22 +149,23 @@ cat /tmp/claude-quota.log
 
 L'app attend la reponse API. Verifie ta connexion internet et que le token est valide.
 
-**Popup Keychain "claude-quota veut acceder au trousseau"**
+**Popup Keychain "ClaudeQuota veut acceder au trousseau"**
 
 Clic **Toujours autoriser** pour eviter que ca se reproduise.
 
 ## Desinstallation
 
 ```bash
-# Arreter l'app
-pkill claude-quota
+make uninstall
+```
 
-# Supprimer le LaunchAgent
+Ou manuellement :
+
+```bash
+pkill ClaudeQuota
 launchctl unload ~/Library/LaunchAgents/com.claude.quota.plist 2>/dev/null
 rm ~/Library/LaunchAgents/com.claude.quota.plist
-
-# Supprimer le binaire
-rm /usr/local/bin/claude-quota
+rm -rf /Applications/ClaudeQuota.app
 ```
 
 ## License

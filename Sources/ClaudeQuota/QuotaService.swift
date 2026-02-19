@@ -273,17 +273,26 @@ enum QuotaError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .keychainAccessFailed(let status):
-            return "Keychain read failed (status: \(status)). Make sure Claude Code is logged in."
+            if status == errSecItemNotFound {
+                return "Token Claude Code introuvable. Lance 'claude auth login' d'abord."
+            }
+            return "Acces Keychain refuse (code \(status)). Relance l'app et clique 'Toujours autoriser'."
         case .keychainWriteFailed(let status):
-            return "Keychain write failed (status: \(status))."
+            return "Ecriture Keychain echouee (code \(status))."
         case .tokenParsingFailed:
-            return "Failed to parse OAuth token."
+            return "Token OAuth invalide. Lance 'claude auth login' pour te reconnecter."
         case .tokenRefreshFailed:
-            return "Token refresh failed. Try running 'claude auth login' to re-authenticate."
+            return "Refresh token echoue. Lance 'claude auth login' pour te reconnecter."
         case .invalidResponse:
-            return "Invalid API response."
+            return "Reponse API invalide. Verifie ta connexion internet."
         case .apiError(let code, _):
-            return "API error (HTTP \(code))."
+            if code == 401 {
+                return "Token expire. Lance 'claude auth login' pour te reconnecter."
+            }
+            if code == 429 {
+                return "Rate limit API atteint. Reessai dans quelques minutes."
+            }
+            return "Erreur API (HTTP \(code)). Voir les logs pour plus de details."
         }
     }
 }
