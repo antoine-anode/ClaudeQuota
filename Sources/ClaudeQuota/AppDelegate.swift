@@ -4,6 +4,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var refreshTimer: Timer?
     private var lastQuota: QuotaInfo?
+    private var lastFetchDate: Date?
     private var lastError: String?
     private var isRefreshing = false
 
@@ -16,6 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupStatusItem()
+        setupWakeObserver()
         updateDisplay(text: "☁ ...", color: .labelColor)
         refreshQuota()
         scheduleTimer(interval: normalInterval)
@@ -26,6 +28,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         rebuildMenu()
+    }
+
+    private func setupWakeObserver() {
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(handleWake),
+            name: NSWorkspace.didWakeNotification,
+            object: nil
+        )
+    }
+
+    @objc private func handleWake() {
+        log("Mac woke from sleep, refreshing quota...")
+        // Show stale indicator immediately
+        updateDisplay(text: "☁ ...", color: .labelColor)
+        // Refresh after a short delay (network may not be ready instantly)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            self?.refreshQuota()
+        }
+        // Restart the timer (it may have drifted during sleep)
+        let interval = lastQuota.map { $0.utilization5h >= highUsageThreshold ? highUsageInterval : normalInterval } ?? normalInterval
+        scheduleTimer(interval: interval)
     }
 
     private func rebuildMenu() {
@@ -61,6 +85,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 )
                 fbItem.isEnabled = false
                 menu.addItem(fbItem)
+            }
+
+            if let fetchDate = lastFetchDate {
+                let ago = Int(Date().timeIntervalSince(fetchDate))
+                let agoStr = ago < 60 ? "\(ago)s" : "\(ago / 60)min"
+                let ageItem = NSMenuItem(title: "Mis à jour il y a \(agoStr)", action: nil, keyEquivalent: "")
+                ageItem.isEnabled = false
+                menu.addItem(ageItem)
             }
 
             menu.addItem(NSMenuItem.separator())
@@ -129,6 +161,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let quota = try await QuotaService.shared.fetchQuota()
                 await MainActor.run {
                     self.lastQuota = quota
+                    self.lastFetchDate = Date()
                     self.lastError = nil
                     self.applyQuota(quota)
                     self.isRefreshing = false
