@@ -7,6 +7,7 @@ DMG_NAME    := $(APP_NAME)-$(VERSION)
 BINARY      := .build/release/$(APP_NAME)
 INSTALL_DIR := /Applications
 AGENT_PLIST := $(HOME)/Library/LaunchAgents/$(BUNDLE_ID).plist
+SIGN_ID     := $(shell security find-identity -v -p codesigning 2>/dev/null | grep "ClaudeQuota Dev" | head -1 | sed 's/.*"\(.*\)"/\1/' || echo "-")
 
 .PHONY: all build bundle dmg install uninstall clean
 
@@ -25,8 +26,10 @@ bundle: build
 	cp $(BINARY) $(APP_BUNDLE)/Contents/MacOS/$(APP_NAME)
 	chmod +x $(APP_BUNDLE)/Contents/MacOS/$(APP_NAME)
 	cp packaging/Info.plist $(APP_BUNDLE)/Contents/Info.plist
+	mkdir -p $(APP_BUNDLE)/Contents/Resources
+	cp packaging/AppIcon.icns $(APP_BUNDLE)/Contents/Resources/AppIcon.icns
 	printf 'APPL????' > $(APP_BUNDLE)/Contents/PkgInfo
-	codesign --sign - --force --deep --options runtime $(APP_BUNDLE)
+	codesign --sign "$(SIGN_ID)" --force --deep --options runtime $(APP_BUNDLE)
 	@echo "✓ $(APP_BUNDLE) created"
 
 # ── DMG ──────────────────────────────────────────────────────────

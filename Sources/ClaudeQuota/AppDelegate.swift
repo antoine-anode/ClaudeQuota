@@ -18,7 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupStatusItem()
         setupWakeObserver()
-        updateDisplay(text: "☁ ...", color: .labelColor)
+        updateDisplay(parts: [("...", .labelColor)])
         refreshQuota()
         scheduleTimer(interval: normalInterval)
     }
@@ -42,7 +42,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func handleWake() {
         log("Mac woke from sleep, refreshing quota...")
         // Show stale indicator immediately
-        updateDisplay(text: "☁ ...", color: .labelColor)
+        updateDisplay(parts: [("...", .labelColor)])
         // Refresh after a short delay (network may not be ready instantly)
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
             self?.refreshQuota()
@@ -131,16 +131,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Display
 
-    private func updateDisplay(text: String, color: NSColor) {
+    private func updateDisplay(parts: [(String, NSColor)]) {
         guard let button = statusItem.button else { return }
-        let attributed = NSAttributedString(
-            string: text,
-            attributes: [
-                .foregroundColor: color,
-                .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .medium),
-            ]
-        )
-        button.attributedTitle = attributed
+        let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .medium)
+        let result = NSMutableAttributedString()
+        for (text, color) in parts {
+            result.append(NSAttributedString(
+                string: text,
+                attributes: [.foregroundColor: color, .font: font]
+            ))
+        }
+        button.attributedTitle = result
     }
 
     // MARK: - Refresh
@@ -169,7 +170,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             } catch {
                 await MainActor.run {
                     self.lastError = error.localizedDescription
-                    self.updateDisplay(text: "☁ err", color: .systemRed)
+                    self.updateDisplay(parts: [("err", .systemRed)])
                     self.isRefreshing = false
                     self.rebuildMenu()
                     log("Quota fetch error: \(error.localizedDescription)")
@@ -181,10 +182,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func applyQuota(_ quota: QuotaInfo) {
         let pct = quota.percentUsed
         let time = quota.timeUntilReset
-        let text = "☁ \(pct)% | \(time)"
-        let color: NSColor = quota.utilization5h >= 0.80 ? .systemRed : .labelColor
 
-        updateDisplay(text: text, color: color)
+        let pctColor: NSColor = quota.utilization5h >= 0.80 ? .systemRed : .labelColor
+        let timeColor: NSColor
+        if let mins = quota.minutesUntilReset, mins <= 15 {
+            timeColor = .systemBlue
+        } else {
+            timeColor = .labelColor
+        }
+
+        updateDisplay(parts: [
+            ("\(pct)% ", pctColor),
+            (time, timeColor),
+        ])
 
         // Adaptive refresh rate
         let interval = quota.utilization5h >= highUsageThreshold ? highUsageInterval : normalInterval

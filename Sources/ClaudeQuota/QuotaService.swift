@@ -21,10 +21,19 @@ struct QuotaInfo {
     var timeUntilReset: String {
         guard let reset = reset5h else { return "--" }
         let remaining = reset.timeIntervalSinceNow
-        guard remaining > 0 else { return "0h00m" }
+        guard remaining > 0 else { return "0m" }
         let hours = Int(remaining) / 3600
         let minutes = (Int(remaining) % 3600) / 60
-        return "\(hours)h\(String(format: "%02d", minutes))m"
+        if hours > 0 {
+            return "\(hours)h\(String(format: "%02d", minutes))m"
+        } else {
+            return "\(minutes)m"
+        }
+    }
+
+    var minutesUntilReset: Double? {
+        guard let reset = reset5h else { return nil }
+        return reset.timeIntervalSinceNow / 60
     }
 }
 
