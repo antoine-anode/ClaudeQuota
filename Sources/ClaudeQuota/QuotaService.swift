@@ -42,16 +42,11 @@ final class QuotaService {
 
     private let keychainService = "Claude Code-credentials"
     private let apiURL = URL(string: "https://api.anthropic.com/v1/messages")!
-    private let tokenURL = URL(string: "https://platform.claude.com/v1/oauth/token")!
-    private let clientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-
-    private var isRefreshingToken = false
-
     private init() {}
 
-    // MARK: - Keychain
+    // MARK: - Keychain (read-only)
 
-    private func readKeychain() throws -> (accessToken: String, refreshToken: String) {
+    private func readAccessToken() throws -> String {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: keychainService,
@@ -68,124 +63,22 @@ final class QuotaService {
 
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let oauth = json["claudeAiOauth"] as? [String: Any],
-              let accessToken = oauth["accessToken"] as? String,
-              let refreshToken = oauth["refreshToken"] as? String
+              let accessToken = oauth["accessToken"] as? String
         else {
             throw QuotaError.tokenParsingFailed
         }
 
-        return (accessToken, refreshToken)
-    }
-
-    private func writeKeychain(accessToken: String, refreshToken: String) throws {
-        // Read existing keychain data to preserve other fields
-        let readQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var existingResult: AnyObject?
-        SecItemCopyMatching(readQuery as CFDictionary, &existingResult)
-
-        var credentials: [String: Any]
-        if let existingData = existingResult as? Data,
-           let existing = try? JSONSerialization.jsonObject(with: existingData) as? [String: Any]
-        {
-            credentials = existing
-        } else {
-            credentials = [:]
-        }
-
-        // Update only the OAuth tokens
-        credentials["claudeAiOauth"] = [
-            "accessToken": accessToken,
-            "refreshToken": refreshToken,
-        ]
-
-        let data = try JSONSerialization.data(withJSONObject: credentials)
-
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-        ]
-        let update: [String: Any] = [
-            kSecValueData as String: data,
-        ]
-        let status = SecItemUpdate(query as CFDictionary, update as CFDictionary)
-
-        if status == errSecItemNotFound {
-            var addQuery = query
-            addQuery[kSecValueData as String] = data
-            let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
-            guard addStatus == errSecSuccess else {
-                throw QuotaError.keychainWriteFailed(addStatus)
-            }
-        } else if status != errSecSuccess {
-            throw QuotaError.keychainWriteFailed(status)
-        }
-    }
-
-    // MARK: - Token Refresh
-
-    private func refreshAccessToken() async throws -> String {
-        let tokens = try readKeychain()
-        log("Refreshing expired OAuth token...")
-
-        var request = URLRequest(url: tokenURL)
-        request.httpMethod = "POST"
-        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 15
-
-        let body = "grant_type=refresh_token&refresh_token=\(tokens.refreshToken)&client_id=\(clientID)"
-        request.httpBody = body.data(using: .utf8)
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw QuotaError.invalidResponse
-        }
-
-        guard httpResponse.statusCode == 200 else {
-            let errorBody = String(data: data, encoding: .utf8) ?? "no body"
-            log("Token refresh failed (HTTP \(httpResponse.statusCode)): \(String(errorBody.prefix(300)))")
-            throw QuotaError.tokenRefreshFailed
-        }
-
-        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let newAccessToken = json["access_token"] as? String,
-              let newRefreshToken = json["refresh_token"] as? String
-        else {
-            throw QuotaError.tokenParsingFailed
-        }
-
-        // Persist new tokens (rotation: old refresh token is now invalid)
-        try writeKeychain(accessToken: newAccessToken, refreshToken: newRefreshToken)
-        log("Token refreshed successfully")
-
-        return newAccessToken
+        return accessToken
     }
 
     // MARK: - API Probe
 
     func fetchQuota() async throws -> QuotaInfo {
-        let tokens = try readKeychain()
-        let result = try await probeAPI(token: tokens.accessToken)
+        let token = try readAccessToken()
+        let result = try await probeAPI(token: token)
 
-        // If 401, refresh token and retry once
         if case .unauthorized = result {
-            guard !isRefreshingToken else {
-                throw QuotaError.apiError(401, "Token refresh already in progress")
-            }
-            isRefreshingToken = true
-            defer { isRefreshingToken = false }
-
-            let newToken = try await refreshAccessToken()
-            let retryResult = try await probeAPI(token: newToken)
-            if case .success(let quota) = retryResult {
-                return quota
-            }
-            throw QuotaError.apiError(401, "Still unauthorized after token refresh")
+            throw QuotaError.tokenExpired
         }
 
         if case .success(let quota) = result {
@@ -290,9 +183,8 @@ final class QuotaService {
 
 enum QuotaError: LocalizedError {
     case keychainAccessFailed(OSStatus)
-    case keychainWriteFailed(OSStatus)
     case tokenParsingFailed
-    case tokenRefreshFailed
+    case tokenExpired
     case invalidResponse
     case apiError(Int, String)
 
@@ -303,18 +195,13 @@ enum QuotaError: LocalizedError {
                 return "Token Claude Code introuvable. Lance 'claude auth login' d'abord."
             }
             return "Acces Keychain refuse (code \(status)). Relance l'app et clique 'Toujours autoriser'."
-        case .keychainWriteFailed(let status):
-            return "Ecriture Keychain echouee (code \(status))."
         case .tokenParsingFailed:
             return "Token OAuth invalide. Lance 'claude auth login' pour te reconnecter."
-        case .tokenRefreshFailed:
-            return "Refresh token echoue. Lance 'claude auth login' pour te reconnecter."
+        case .tokenExpired:
+            return "Token expire. Utilise Claude Code pour le rafraichir automatiquement."
         case .invalidResponse:
             return "Reponse API invalide. Verifie ta connexion internet."
         case .apiError(let code, _):
-            if code == 401 {
-                return "Token expire. Lance 'claude auth login' pour te reconnecter."
-            }
             if code == 429 {
                 return "Rate limit API atteint. Reessai dans quelques minutes."
             }
