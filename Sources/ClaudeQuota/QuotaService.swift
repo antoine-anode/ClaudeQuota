@@ -103,9 +103,9 @@ final class QuotaService {
         request.timeoutInterval = 15
 
         let body: [String: Any] = [
-            "model": "claude-sonnet-4-5-20250929",
+            "model": "claude-3-haiku-20240307",
             "max_tokens": 1,
-            "messages": [["role": "user", "content": "hi"]],
+            "messages": [["role": "user", "content": "."]],
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
