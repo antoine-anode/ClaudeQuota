@@ -37,6 +37,15 @@ struct QuotaInfo {
     }
 }
 
+struct SonnetQuota {
+    let utilization7d: Double
+    let status7d: String?
+
+    var percentUsed: Int {
+        min(Int(utilization7d * 100), 100)
+    }
+}
+
 final class QuotaService {
     static let shared = QuotaService()
 
@@ -71,29 +80,21 @@ final class QuotaService {
         return accessToken
     }
 
-    // MARK: - API Probe
+    // MARK: - API Probes
 
     func fetchQuota() async throws -> QuotaInfo {
         let token = try readAccessToken()
-        let result = try await probeAPI(token: token)
-
-        if case .unauthorized = result {
-            throw QuotaError.tokenExpired
-        }
-
-        if case .success(let quota) = result {
-            return quota
-        }
-
-        throw QuotaError.invalidResponse
+        let response = try await probe(token: token, model: "claude-3-haiku-20240307")
+        return parseQuotaHeaders(response)
     }
 
-    private enum ProbeResult {
-        case success(QuotaInfo)
-        case unauthorized
+    func fetchSonnetQuota() async throws -> SonnetQuota {
+        let token = try readAccessToken()
+        let response = try await probe(token: token, model: "claude-sonnet-4-20250514")
+        return parseSonnetHeaders(response)
     }
 
-    private func probeAPI(token: String) async throws -> ProbeResult {
+    private func probe(token: String, model: String) async throws -> HTTPURLResponse {
         var request = URLRequest(url: apiURL)
         request.httpMethod = "POST"
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -103,7 +104,7 @@ final class QuotaService {
         request.timeoutInterval = 15
 
         let body: [String: Any] = [
-            "model": "claude-3-haiku-20240307",
+            "model": model,
             "max_tokens": 1,
             "messages": [["role": "user", "content": "."]],
         ]
@@ -116,7 +117,7 @@ final class QuotaService {
         }
 
         if httpResponse.statusCode == 401 {
-            return .unauthorized
+            throw QuotaError.tokenExpired
         }
 
         if httpResponse.statusCode != 200 {
@@ -125,7 +126,7 @@ final class QuotaService {
             throw QuotaError.apiError(httpResponse.statusCode, errorBody)
         }
 
-        return .success(parseQuotaHeaders(httpResponse))
+        return httpResponse
     }
 
     // MARK: - Header Parsing
@@ -139,7 +140,6 @@ final class QuotaService {
         let claim = stringHeader(headers, key: "anthropic-ratelimit-unified-representative-claim")
         let fallback = doubleHeader(headers, key: "anthropic-ratelimit-unified-fallback-percentage")
 
-        // Parse reset timestamp
         var reset5h: Date?
         if let resetTs = doubleHeader(headers, key: "anthropic-ratelimit-unified-5h-reset") {
             reset5h = Date(timeIntervalSince1970: resetTs)
@@ -164,6 +164,14 @@ final class QuotaService {
             representativeClaim: claim,
             fallbackPercentage: fallback
         )
+    }
+
+    private func parseSonnetHeaders(_ response: HTTPURLResponse) -> SonnetQuota {
+        let headers = response.allHeaderFields
+        let util7d = doubleHeader(headers, key: "anthropic-ratelimit-unified-7d_sonnet-utilization") ?? 0
+        let status = stringHeader(headers, key: "anthropic-ratelimit-unified-7d_sonnet-status")
+        log("Sonnet: 7d=\(String(format: "%.1f", util7d * 100))% status=\(status ?? "?")")
+        return SonnetQuota(utilization7d: util7d, status7d: status)
     }
 
     private func stringHeader(_ headers: [AnyHashable: Any], key: String) -> String? {

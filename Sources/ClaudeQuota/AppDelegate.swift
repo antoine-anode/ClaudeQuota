@@ -8,6 +8,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastError: String?
     private var isRefreshing = false
 
+    private var lastSonnetQuota: SonnetQuota?
+    private var lastSonnetFetchDate: Date?
+    private var sonnetTimer: Timer?
+    private let sonnetInterval: TimeInterval = 900  // 15 minutes
+
     private let normalInterval: TimeInterval = 120   // 2 minutes
     private let highUsageInterval: TimeInterval = 30  // 30 seconds when >=75%
     private let highUsageThreshold: Double = 0.75
@@ -20,7 +25,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupWakeObserver()
         updateDisplay(parts: [("...", .labelColor)])
         refreshQuota()
+        refreshSonnetQuota()
         scheduleTimer(interval: normalInterval)
+        sonnetTimer = Timer.scheduledTimer(withTimeInterval: sonnetInterval, repeats: true) { [weak self] _ in
+            self?.refreshSonnetQuota()
+        }
     }
 
     // MARK: - Status Bar
@@ -41,13 +50,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func handleWake() {
         log("Mac woke from sleep, refreshing quota...")
-        // Show stale indicator immediately
         updateDisplay(parts: [("...", .labelColor)])
-        // Refresh after a short delay (network may not be ready instantly)
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
             self?.refreshQuota()
         }
-        // Restart the timer (it may have drifted during sleep)
         let interval = lastQuota.map { $0.utilization5h >= highUsageThreshold ? highUsageInterval : normalInterval } ?? normalInterval
         scheduleTimer(interval: interval)
     }
@@ -57,7 +63,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if let q = lastQuota {
             let usageItem = NSMenuItem(
-                title: "Usage 5h: \(q.percentUsed)%  —  Reset: \(q.timeUntilReset)",
+                title: "Usage 5h : \(q.percentUsed)%  —  Reset : \(q.timeUntilReset)",
                 action: nil, keyEquivalent: ""
             )
             usageItem.isEnabled = false
@@ -65,22 +71,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             if q.utilization7d > 0 {
                 let weekItem = NSMenuItem(
-                    title: "Usage 7j: \(Int(q.utilization7d * 100))%",
+                    title: "Usage 7j : \(Int(q.utilization7d * 100))%",
                     action: nil, keyEquivalent: ""
                 )
                 weekItem.isEnabled = false
                 menu.addItem(weekItem)
             }
 
+            if let sq = lastSonnetQuota {
+                let title: String
+                if let fetchDate = lastSonnetFetchDate {
+                    let ago = Int(Date().timeIntervalSince(fetchDate))
+                    let agoStr = ago < 60 ? "\(ago)s" : "\(ago / 60)min"
+                    title = "Sonnet 7j : \(sq.percentUsed)%  (il y a \(agoStr)) ↻"
+                } else {
+                    title = "Sonnet 7j : \(sq.percentUsed)% ↻"
+                }
+                let sonnetItem = NSMenuItem(title: title, action: #selector(refreshSonnetAction), keyEquivalent: "")
+                sonnetItem.target = self
+                menu.addItem(sonnetItem)
+            } else {
+                let sonnetItem = NSMenuItem(title: "Sonnet 7j : charger ↻", action: #selector(refreshSonnetAction), keyEquivalent: "")
+                sonnetItem.target = self
+                menu.addItem(sonnetItem)
+            }
+
             if let status = q.status {
-                let statusMenuItem = NSMenuItem(title: "Status: \(status)", action: nil, keyEquivalent: "")
+                let statusMenuItem = NSMenuItem(title: "Status : \(status)", action: nil, keyEquivalent: "")
                 statusMenuItem.isEnabled = false
                 menu.addItem(statusMenuItem)
             }
 
             if let fallback = q.fallbackPercentage, fallback > 0 {
                 let fbItem = NSMenuItem(
-                    title: "Fallback disponible: \(Int(fallback * 100))%",
+                    title: "Fallback disponible : \(Int(fallback * 100))%",
                     action: nil, keyEquivalent: ""
                 )
                 fbItem.isEnabled = false
@@ -99,7 +123,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if let err = lastError {
-            let errItem = NSMenuItem(title: "Erreur: \(err)", action: nil, keyEquivalent: "")
+            let errItem = NSMenuItem(title: "Erreur : \(err)", action: nil, keyEquivalent: "")
             errItem.isEnabled = false
             menu.addItem(errItem)
             menu.addItem(NSMenuItem.separator())
@@ -179,7 +203,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func refreshSonnetQuota() {
+        Task {
+            do {
+                let sq = try await QuotaService.shared.fetchSonnetQuota()
+                await MainActor.run {
+                    self.lastSonnetQuota = sq
+                    self.lastSonnetFetchDate = Date()
+                    self.updateStatusBar()
+                    self.rebuildMenu()
+                }
+            } catch {
+                await MainActor.run {
+                    log("Sonnet quota fetch error: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
     private func applyQuota(_ quota: QuotaInfo) {
+        updateStatusBar()
+
+        // Adaptive refresh rate
+        let interval = quota.utilization5h >= highUsageThreshold ? highUsageInterval : normalInterval
+        if refreshTimer?.timeInterval != interval {
+            scheduleTimer(interval: interval)
+        }
+
+        rebuildMenu()
+    }
+
+    private func updateStatusBar() {
+        guard let quota = lastQuota else { return }
         let pct = quota.percentUsed
         let time = quota.timeUntilReset
 
@@ -191,18 +246,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             timeColor = .labelColor
         }
 
-        updateDisplay(parts: [
+        var parts: [(String, NSColor)] = [
             ("\(pct)% ", pctColor),
-            (time, timeColor),
-        ])
+        ]
 
-        // Adaptive refresh rate
-        let interval = quota.utilization5h >= highUsageThreshold ? highUsageInterval : normalInterval
-        if refreshTimer?.timeInterval != interval {
-            scheduleTimer(interval: interval)
+        if let sq = lastSonnetQuota {
+            let sonnetColor: NSColor = sq.utilization7d >= 0.80 ? .systemRed : .secondaryLabelColor
+            parts.append(("S:\(sq.percentUsed)% ", sonnetColor))
         }
 
-        rebuildMenu()
+        parts.append((time, timeColor))
+        updateDisplay(parts: parts)
     }
 
     // MARK: - Launch at Login (LaunchAgent)
@@ -213,7 +267,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func toggleLaunchAtLogin() {
         if isLaunchAgentInstalled() {
-            // Unload and remove
             let task = Process()
             task.executableURL = URL(fileURLWithPath: "/bin/launchctl")
             task.arguments = ["unload", launchAgentPath]
@@ -221,7 +274,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             task.waitUntilExit()
             try? FileManager.default.removeItem(atPath: launchAgentPath)
         } else {
-            // Create and load — use the current binary's path
             let execPath = Bundle.main.executablePath ?? ProcessInfo.processInfo.arguments[0]
             let plist: [String: Any] = [
                 "Label": "com.claude.quota",
@@ -246,6 +298,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func refreshAction() {
         refreshQuota()
+    }
+
+    @objc private func refreshSonnetAction() {
+        refreshSonnetQuota()
     }
 
     @objc private func openLogs() {
