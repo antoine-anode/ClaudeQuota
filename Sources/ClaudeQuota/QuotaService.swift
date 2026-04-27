@@ -84,7 +84,7 @@ final class QuotaService {
 
     func fetchQuota() async throws -> QuotaInfo {
         let token = try readAccessToken()
-        let response = try await probe(token: token, model: "claude-3-haiku-20240307")
+        let response = try await probe(token: token, model: "claude-haiku-4-5-20251001")
         return parseQuotaHeaders(response)
     }
 
